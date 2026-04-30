@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Market Simulator - Room {{ room_code }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="dashboard">
+        <!-- Full-Width Headline Ticker -->
+        <div class="ticker-wrap">
+            <div class="ticker" id="headline-track">
+                <span class="ticker-text" id="headline-text">Loading headline...</span>
+            </div>
+            <div class="ticker-meta" id="news-year-label">Year: {{ start_date[:4] }}</div>
+        </div>
+        <div class="rumor-wrap hidden" id="rumor-wrap">
+            <div class="rumor-label">Rumors</div>
+            <div class="rumor-text" id="rumor-text">Insider rumors appear here.</div>
+        </div>
+        <div class="news-error" id="headline-error"></div>
+
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <h1>📈 Stock Simulator</h1>
+                <span class="room-badge">Room: {{ room_code }}</span>
+            </div>
+            <div class="header-center">
+                <div class="date-display">
+                    <span class="date-label">Game Date</span>
+                    <span class="date-value" id="current-date">{{ start_date }}</span>
+                </div>
+                <div class="game-status">
+                    <span class="status-indicator" id="status-indicator"></span>
+                    <span id="status-text">Paused</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <span class="user-badge">👤 {{ username }}</span>
+                {% if is_admin %}
+                <span class="admin-badge">Admin</span>
+                {% endif %}
+                {% if is_insider %}
+                <span class="insider-badge">Insider</span>
+                {% endif %}
+            </div>
+        </header>
+
+        <!-- Admin Controls -->
+        {% if is_admin %}
+        <div class="admin-controls" id="admin-controls">
+            <div class="control-group">
+                <button class="btn btn-primary" id="play-pause-btn">
+                    <span class="btn-icon">▶</span> Play
+                </button>
+            </div>
+            <div class="control-group">
+                <label for="date-picker">Jump to Date:</label>
+                <input type="date" id="date-picker" value="{{ start_date }}" min="{{ min_date }}" max="{{ max_date }}">
+                <button class="btn btn-secondary" id="set-date-btn">Set Date</button>
+            </div>
+            <div class="control-group">
+                <button class="btn btn-danger" id="reset-btn">↺ Reset Game</button>
+            </div>
+            <div class="control-group insider-control">
+                <label for="insider-username">Set Insider User</label>
+                <input type="text" id="insider-username" placeholder="Username" autocomplete="off">
+                <button class="btn btn-warning" id="set-insider-btn">Grant Insider</button>
+                <button class="btn btn-secondary" id="revoke-insider-btn">Revoke Insider</button>
+            </div>
+            <div class="speed-indicator">
+                ⏱️ Presentation Speed: 1 year = 4 seconds (100 years ≈ 7 minutes)
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Left Column: Stocks -->
+            <section class="stocks-section">
+                <h2>Available Stocks</h2>
+                <div class="stocks-grid" id="stocks-grid">
+                    {% for ticker in tickers %}
+                    <div class="stock-card" data-ticker="{{ ticker }}">
+                        <div class="stock-header">
+                            <span class="ticker">{{ ticker }}</span>
+                            <span class="company-name">{{ company_names[ticker] }}</span>
+                        </div>
+                        <div class="stock-price">
+                            <span class="price" id="price-{{ ticker }}">$0.00</span>
+                            <span class="price-change" id="change-{{ ticker }}"></span>
+                        </div>
+                        <div class="stock-actions">
+                            <button class="btn btn-buy" data-ticker="{{ ticker }}">Buy</button>
+                            <button class="btn btn-sell" data-ticker="{{ ticker }}">Sell</button>
+                        </div>
+                        <div class="stock-status" id="status-{{ ticker }}"></div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </section>
+
+            <!-- Center Column: Chart -->
+            <section class="chart-section">
+                <h2 id="index-title">Dow Jones Progress</h2>
+                <div class="index-value" id="index-value">--</div>
+                <div class="chart-container">
+                    <canvas id="sp500-chart"></canvas>
+                </div>
+                <div class="chart-legend">
+                    <span id="chart-legend-text">📊 Historical Dow Jones Index</span>
+                </div>
+            </section>
+
+            <!-- Right Column: Portfolio & Leaderboard -->
+            <aside class="sidebar">
+                <!-- Portfolio -->
+                <div class="portfolio-card">
+                    <h2>Your Portfolio</h2>
+                    <div class="portfolio-summary">
+                        <div class="portfolio-item">
+                            <span class="label">Cash</span>
+                            <span class="value" id="cash-balance">$100.00</span>
+                        </div>
+                        <div class="portfolio-item">
+                            <span class="label">Holdings Value</span>
+                            <span class="value" id="holdings-value">$0.00</span>
+                        </div>
+                        <div class="portfolio-item total">
+                            <span class="label">Net Worth</span>
+                            <span class="value" id="net-worth">$100.00</span>
+                        </div>
+                    </div>
+                    <div class="holdings-list" id="holdings-list">
+                        <p class="empty-message">No holdings yet</p>
+                    </div>
+                </div>
+
+                <!-- Leaderboard -->
+                <div class="leaderboard-card">
+                    <h2>🏆 Leaderboard</h2>
+                    <div class="leaderboard-list" id="leaderboard-list">
+                        <!-- Populated by SocketIO -->
+                    </div>
+                </div>
+            </aside>
+        </main>
+    </div>
+
+    <!-- Trade Modal -->
+    <div class="modal" id="trade-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modal-title">Trade</h3>
+                <button class="modal-close" id="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="trade-info">
+                    <span id="modal-ticker">AAPL</span>
+                    <span id="modal-price">$0.00</span>
+                </div>
+                <div class="form-group">
+                    <label id="trade-input-label" for="dollar-input">Dollar Amount</label>
+                    <input type="number" id="dollar-input" value="100" min="1" step="0.01">
+                    <small>Fractional shares are allowed for buys.</small>
+                </div>
+                <div class="trade-total">
+                    <span id="trade-total-label">Estimated Shares:</span>
+                    <span id="trade-total">0.00</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-cancel" id="modal-cancel">Cancel</button>
+                <button class="btn btn-confirm" id="modal-confirm">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <script>
+        // Pass server data to client
+        window.roomCode = '{{ room_code }}';
+        window.username = '{{ username }}';
+        window.isAdmin = {{ 'true' if is_admin else 'false' }};
+        window.isInsider = {{ 'true' if is_insider else 'false' }};
+        window.startDate = '{{ start_date }}';
+        window.minDate = '{{ min_date }}';
+        window.maxDate = '{{ max_date }}';
+        window.tickers = {{ tickers | tojson }};
+    </script>
+</body>
+</html>

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Historical Stock Market Simulator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="landing-container">
+        <div class="landing-card">
+            <div class="logo-section">
+                <div class="logo-icon">📈</div>
+                <h1>Stock Market Simulator</h1>
+                <p class="tagline">Travel through time and compete to build wealth</p>
+            </div>
+
+            {% if error %}
+            <div class="error-message">
+                {{ error }}
+            </div>
+            {% endif %}
+
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="join">Join Game</button>
+                <button class="tab-btn" data-tab="create">Create Room</button>
+            </div>
+
+            <div class="tab-content active" id="join-tab">
+                <form action="{{ url_for('join_room_route') }}" method="POST">
+                    <div class="form-group">
+                        <label for="join-username">Your Name</label>
+                        <input type="text" id="join-username" name="username" placeholder="Enter your name" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="room-code">Room Code</label>
+                        <input type="text" id="room-code" name="room_code" placeholder="e.g., ABC123" maxlength="6" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Join Room</button>
+                </form>
+            </div>
+
+            <div class="tab-content" id="create-tab">
+                <form action="{{ url_for('create_room') }}" method="POST">
+                    <div class="form-group">
+                        <label for="create-username">Your Name</label>
+                        <input type="text" id="create-username" name="username" placeholder="Enter your name" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="start-date">Starting Date</label>
+                        <input type="date" id="start-date" name="start_date" value="1920-01-01" min="1920-01-01" max="2024-12-31">
+                        <small>Choose when to start the simulation</small>
+                    </div>
+                    <button type="submit" class="btn btn-success">Create Room</button>
+                </form>
+            </div>
+
+            <div class="info-section">
+                <h3>How It Works</h3>
+                <ul>
+                    <li>🎓 <strong>Teachers</strong> control time and set the starting date</li>
+                    <li>💰 <strong>Students</strong> start with $100 to invest</li>
+                    <li>📅 Time advances at 1 year every 10 seconds</li>
+                    <li>🏆 Compete on the leaderboard to build the most wealth</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Tab switching
+        const tabBtns = document.querySelectorAll('.tab-btn');
+        const tabContents = document.querySelectorAll('.tab-content');
+
+        tabBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const tab = btn.dataset.tab;
+                
+                tabBtns.forEach(b => b.classList.remove('active'));
+                tabContents.forEach(c => c.classList.remove('active'));
+                
+                btn.classList.add('active');
+                document.getElementById(`${tab}-tab`).classList.add('active');
+            });
+        });
+
+        // Auto-uppercase room code
+        document.getElementById('room-code').addEventListener('input', (e) => {
+            e.target.value = e.target.value.toUpperCase();
+        });
+
+        // Set max date to today
+        const today = new Date().toISOString().split('T')[0];
+        document.getElementById('start-date').max = today;
+    </script>
+</body>
+</html>
