@@ -2,6 +2,11 @@
 Main Flask Application for Historical Stock Market Simulator
 """
 
+
+import eventlet
+eventlet.monkey_patch()
+
+
 import os
 import random
 import string
