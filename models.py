@@ -9,13 +9,16 @@ from datetime import datetime
 from typing import Dict, Optional, List
 import os
 import time
+import practice_mode
+
+DEFAULT_PRACTICE_STARTING_CASH = 1000.0
+DEFAULT_HISTORICAL_STARTING_CASH = 1000.0
+
+def get_default_starting_cash() -> float:
+    return DEFAULT_PRACTICE_STARTING_CASH if practice_mode.PRACTICE_MODE else DEFAULT_HISTORICAL_STARTING_CASH
 
 DATABASE_FILE = 'stock_simulator.db'
 DEFAULT_START_DATE = '1928-01-01'
-
-# Starting cash adjusted for inflation (2026 dollars)
-# $100 * 18 = $1,800
-DEFAULT_STARTING_CASH = 1800.0
 
 
 def get_db_connection():
@@ -49,11 +52,11 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             room_code TEXT NOT NULL,
             username TEXT NOT NULL,
-            cash REAL DEFAULT 100.0,
+            cash REAL DEFAULT 1000.0,
             holdings TEXT DEFAULT '{}',
             is_admin BOOLEAN DEFAULT FALSE,
             is_insider BOOLEAN DEFAULT FALSE,
-            has_had_insider_turn BOOLEAN DEFAULT FALSE,
+            has_used_insider_tip BOOLEAN DEFAULT FALSE,
             FOREIGN KEY (room_code) REFERENCES rooms(code),
             UNIQUE(room_code, username)
         )
@@ -62,10 +65,44 @@ def init_db():
     # Migrate existing players table if the is_insider column is missing
     cursor.execute("PRAGMA table_info(players)")
     columns = [row[1] for row in cursor.fetchall()]
+    if 'is_admin' not in columns:
+        cursor.execute('ALTER TABLE players ADD COLUMN is_admin BOOLEAN DEFAULT FALSE')
+        # Set first player in each room as admin
+        cursor.execute('''
+            UPDATE players SET is_admin = TRUE
+            WHERE id IN (
+                SELECT MIN(id) FROM players GROUP BY room_code
+            )
+        ''')
     if 'is_insider' not in columns:
         cursor.execute('ALTER TABLE players ADD COLUMN is_insider BOOLEAN DEFAULT FALSE')
-    if 'has_had_insider_turn' not in columns:
-        cursor.execute('ALTER TABLE players ADD COLUMN has_had_insider_turn BOOLEAN DEFAULT FALSE')
+    if 'has_used_insider_tip' not in columns:
+        cursor.execute('ALTER TABLE players ADD COLUMN has_used_insider_tip BOOLEAN DEFAULT FALSE')
+    
+    # Update the DEFAULT value for cash column from 100.0 to 1000.0
+    cursor.execute("PRAGMA table_info(players)")
+    columns_info = {row[1]: row[4] for row in cursor.fetchall()}  # column_name -> default_value
+    if columns_info.get('cash') == '100.0':
+        print("Updating cash DEFAULT from 100.0 to 1000.0...")
+        # SQLite doesn't support changing column defaults directly, so we need to recreate the table
+        cursor.execute('''
+            CREATE TABLE players_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_code TEXT NOT NULL,
+                username TEXT NOT NULL,
+                cash REAL DEFAULT 1000.0,
+                holdings TEXT DEFAULT '{}',
+                is_admin BOOLEAN DEFAULT FALSE,
+                is_insider BOOLEAN DEFAULT FALSE,
+                has_used_insider_tip BOOLEAN DEFAULT FALSE,
+                FOREIGN KEY (room_code) REFERENCES rooms(code),
+                UNIQUE(room_code, username)
+            )
+        ''')
+        cursor.execute('INSERT INTO players_new SELECT * FROM players')
+        cursor.execute('DROP TABLE players')
+        cursor.execute('ALTER TABLE players_new RENAME TO players')
+        print("Cash DEFAULT updated successfully")
     
     conn.commit()
     conn.close()
@@ -161,17 +198,17 @@ class Room:
 
 class Player:
     """Player model for managing students"""
-    
-    def __init__(self, room_code: str, username: str, cash: float = 100.0, 
+
+    def __init__(self, room_code: str, username: str, cash: float = 100.0,
                  holdings: Dict[str, float] = None, is_admin: bool = False,
-                 is_insider: bool = False, has_had_insider_turn: bool = False):
+                 is_insider: bool = False, has_used_insider_tip: bool = False):
         self.room_code = room_code
         self.username = username
         self.cash = cash
         self.holdings = holdings or {}
         self.is_admin = is_admin
         self.is_insider = is_insider
-        self.has_had_insider_turn = has_had_insider_turn
+        self.has_used_insider_tip = has_used_insider_tip
     
     @staticmethod
     def create(room_code: str, username: str, is_admin: bool = False, is_insider: bool = False) -> 'Player':
@@ -200,12 +237,15 @@ class Player:
                     candidate = f"{base_username}{counter}"
                     counter += 1
 
+                starting_cash = get_default_starting_cash()
+                print(f"DEBUG: Creating player {candidate} with starting_cash={starting_cash}")
                 cursor.execute('''
-                    INSERT INTO players (room_code, username, cash, holdings, is_admin, is_insider, has_had_insider_turn)
-                    VALUES (?, ?, 1800.0, '{}', ?, ?, FALSE)
-                ''', (room_code, candidate, is_admin, is_insider))
+                    INSERT INTO players (room_code, username, cash, holdings, is_admin, is_insider, has_used_insider_tip)
+                    VALUES (?, ?, ?, '{}', ?, ?, FALSE)
+                ''', (room_code, candidate, starting_cash, is_admin, is_insider))
                 conn.commit()
-                return Player(room_code, candidate, 1800.0, {}, is_admin, is_insider, False)
+                print(f"DEBUG: Player {candidate} created in database with cash={starting_cash}")
+                return Player(room_code, candidate, starting_cash, {}, is_admin, is_insider, False)
             except sqlite3.OperationalError as e:
                 if conn:
                     conn.rollback()
@@ -234,14 +274,15 @@ class Player:
         conn.close()
         
         if row:
+            print(f"DEBUG: Retrieved player {username} from database with cash={row['cash']}")
             player = Player(
                 row['room_code'], 
-                row['username'], 
+                row['username'],
                 row['cash'],
                 json.loads(row['holdings']),
                 row['is_admin'],
                 bool(row['is_insider']) if 'is_insider' in row.keys() else False,
-                bool(row['has_had_insider_turn']) if 'has_had_insider_turn' in row.keys() else False
+                bool(row['has_used_insider_tip']) if 'has_used_insider_tip' in row.keys() else False
             )
             player.id = row['id']
             return player
@@ -269,7 +310,7 @@ class Player:
                 json.loads(row['holdings']),
                 row['is_admin'],
                 bool(row['is_insider']) if 'is_insider' in row.keys() else False,
-                bool(row['has_had_insider_turn']) if 'has_had_insider_turn' in row.keys() else False
+                bool(row['has_used_insider_tip']) if 'has_used_insider_tip' in row.keys() else False
             )
             player.id = row['id']
             players.append(player)
@@ -282,15 +323,15 @@ class Player:
         cursor = conn.cursor()
         
         cursor.execute('''
-            UPDATE players 
-            SET cash = ?, holdings = ?, is_admin = ?, is_insider = ?, has_had_insider_turn = ?
+            UPDATE players
+            SET cash = ?, holdings = ?, is_admin = ?, is_insider = ?, has_used_insider_tip = ?
             WHERE room_code = ? AND username = ?
         ''', (
             self.cash,
             json.dumps(self.holdings),
             self.is_admin,
             self.is_insider,
-            self.has_had_insider_turn,
+            self.has_used_insider_tip,
             self.room_code,
             self.username
         ))
@@ -336,12 +377,20 @@ class Player:
                 holdings_value = holdings_value + (shares * prices[ticker])
         return self.cash + holdings_value
     
+    def get_holdings_value(self, prices: Dict[str, float]) -> float:
+        """Calculate the total value of all holdings"""
+        holdings_value = 0.0
+        for ticker, shares in self.holdings.items():
+            if ticker in prices:
+                holdings_value = holdings_value + (shares * prices[ticker])
+        return round(holdings_value, 2)
+    
     def reset(self):
         """Reset player to initial state"""
-        self.cash = 1800.0
+        self.cash = get_default_starting_cash()
         self.holdings = {}
         self.is_insider = False
-        self.has_had_insider_turn = False
+        self.has_used_insider_tip = False
         self.save()
     
     def to_dict(self, prices: Dict[str, float] = None) -> dict:
@@ -354,7 +403,7 @@ class Player:
             'net_worth': net_worth,
             'is_admin': self.is_admin,
             'is_insider': self.is_insider,
-            'has_had_insider_turn': self.has_had_insider_turn
+            'has_used_insider_tip': self.has_used_insider_tip
         }
 
 

@@ -3,7 +3,7 @@ Practice Mode Data for Historical Stock Market Simulator
 Simplified fictional stock data for testing game mechanics
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 import random
 
 # Fictional stock ticker
@@ -18,48 +18,40 @@ PRACTICE_IPO_DATE = '1920-01-01'
 # Starting price
 START_PRICE = 50.0
 
-# Price history: 100 steps
-# Phase 1 (steps 1-25): Rise from $50 to $120
-# Phase 2 (steps 26-50): Crash from $120 to $15
-# Phase 3 (steps 51-100): Stabilize around $60
-
 def generate_practice_prices():
-    """Generate 100-step price history for GLOBEX"""
+    """Generate multi-year fictional price history for GLOBEX"""
     prices = {}
+    rng = random.Random(421)
     current_price = START_PRICE
-
-    # Start date
     base_date = datetime(1920, 1, 1)
 
-    for step in range(1, 101):
-        date = base_date + timedelta(days=step - 1)
+    for step in range(0, 81):
+        month_index = step * 3
+        year = base_date.year + month_index // 12
+        month = (base_date.month - 1 + month_index) % 12 + 1
+        date = datetime(year, month, 1)
         date_str = date.strftime('%Y-%m-%d')
 
-        if step <= 25:
-            # Phase 1: Rise to $120
-            # Target: from 50 to 120 over 25 steps
-            target_price = 50 + (120 - 50) * (step / 25)
-            # Add some volatility
-            volatility = random.uniform(-0.05, 0.05)
-            current_price = target_price * (1 + volatility)
-
-        elif step <= 50:
-            # Phase 2: Crash to $15
-            # Target: from 120 to 15 over 25 steps (steps 26-50)
-            progress = (step - 25) / 25
-            target_price = 120 - (120 - 15) * progress
-            # Add volatility (more during crash)
-            volatility = random.uniform(-0.15, 0.05)
-            current_price = target_price * (1 + volatility)
-
+        if step < 16:
+            drift = 0.055
+            shock = rng.uniform(-0.08, 0.10)
+        elif step < 28:
+            drift = -0.11
+            shock = rng.uniform(-0.18, 0.07)
+        elif step < 44:
+            drift = 0.075
+            shock = rng.uniform(-0.10, 0.13)
+        elif step < 58:
+            drift = -0.035
+            shock = rng.uniform(-0.16, 0.11)
         else:
-            # Phase 3: Stabilize around $60
-            # Oscillate around 60 with moderate volatility
-            target_price = 60.0
-            volatility = random.uniform(-0.10, 0.10)
-            current_price = target_price * (1 + volatility)
+            drift = 0.035
+            shock = rng.uniform(-0.12, 0.12)
 
-        # Ensure price doesn't go negative
+        if step in {10, 27, 41, 56, 70}:
+            shock += rng.choice([-0.28, 0.24, -0.20, 0.18])
+
+        current_price = current_price * (1 + drift + shock)
         current_price = max(current_price, 0.01)
         prices[date_str] = round(current_price, 2)
 

@@ -1,44 +1,134 @@
 """
 Data Engine for Historical Stock Market Simulator
-Fetches and manages historical stock data using yfinance
-With fallback to sample data if yfinance fails
+Uses internal Historical Truth Table for pre-1950 data
+With fallback to sample data if needed
 """
 
-import yfinance as yf
+from bisect import bisect_right
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 import json
+import math
 import os
+import random
 import time
 import pandas as pd
 
-# Stock tickers to fetch
-TICKERS = ['^DJI', '^GSPC']
+# Import practice mode configuration and practice data
+from practice_mode import PRACTICE_MODE
+from practice_data import PRACTICE_DATA
 
-# Inflation multiplier to adjust prices to 2026 dollars
-INFLATION_MULTIPLIER = 18.0
-
-# Company names for display
-COMPANY_NAMES = {
-    '^DJI': 'Dow Jones Industrial Average',
-    '^GSPC': 'S&P 500'
-}
-
-# IPO dates for each ticker
-IPO_DATES = {
-    '^DJI': '1900-01-01',
-    '^GSPC': '1957-03-01'
-}
+if PRACTICE_MODE:
+    TICKERS = PRACTICE_DATA['tickers']
+    COMPANY_NAMES = PRACTICE_DATA['company_names']
+    IPO_DATES = PRACTICE_DATA['ipo_dates']
+else:
+    TICKERS = ['^DJI', '^GSPC']
+    COMPANY_NAMES = {
+        '^DJI': 'Dow Jones Industrial Average',
+        '^GSPC': 'S&P 500'
+    }
+    IPO_DATES = {
+        '^DJI': '1900-01-01',
+        '^GSPC': '1957-03-01'
+    }
 
 # Cache file for storing fetched data
 CACHE_FILE = 'stock_data_cache.json'
 
 # Fallback prices for Jan 1, 1928 (historical reference)
-# These will be multiplied by INFLATION_MULTIPLIER (18.0) to get 2026 values
+# Normalized so that 1929 peak ~$100, 1960 ~$175-$200
 FALLBACK_PRICES_1928 = {
-    '^DJI': 200.00,  # $200 * 18 = $3,600
-    '^GSPC': 17.50   # $17.50 * 18 = $315
+    '^DJI': 150.00,  # Adjusted for 1960 target of $175-$200
+    '^GSPC': 17.50
 }
+
+# Separate Truth Tables for Dow Jones and S&P 500
+DOW_JONES_TABLE = {
+    # 1928-1939
+    '1928-01-01': 202.40,
+    '1929-09-03': 381.17,
+    '1932-07-08': 41.22,
+    '1937-03-10': 194.40,
+    '1938-03-31': 98.95,
+    # 1940-1959
+    '1942-04-28': 92.92,
+    '1945-08-15': 163.06,
+    '1946-05-29': 212.50,
+    '1949-06-13': 161.60,
+    '1954-11-23': 382.74,
+    '1956-04-06': 521.05,
+    '1957-10-22': 419.79,
+    # 1960-1979
+    '1961-12-13': 734.91,
+    '1962-06-26': 535.76,
+    '1966-02-09': 995.15,
+    '1970-05-26': 631.16,
+    '1973-01-11': 1051.70,
+    '1974-12-06': 577.60,
+    # 1980-1999
+    '1980-04-21': 759.13,
+    '1981-04-27': 1024.05,
+    '1982-08-12': 776.92,
+    '1983-11-29': 1287.20,
+    '1987-08-25': 2722.42,
+    '1987-10-19': 1738.74,
+    '1990-10-11': 2365.10,
+    '1994-04-04': 3593.35,
+    '1999-12-31': 11497.12,
+    # 2000-2026
+    '2002-10-09': 7286.27,
+    '2007-10-09': 14164.53,
+    '2009-03-09': 6547.05,
+    '2015-08-24': 15871.35,
+    '2020-03-23': 18591.93,
+    '2024-05-17': 40003.59,
+    '2026-12-31': 52000.00
+}
+
+SP500_TABLE = {
+    # 1950-1979
+    '1950-01-03': 16.66,
+    '1956-04-06': 49.64,
+    '1962-06-26': 52.32,
+    '1968-06-04': 100.38,
+    '1970-05-26': 69.29,
+    '1974-10-03': 62.28,
+    # 1980-2026
+    '1980-11-28': 140.52,
+    '1982-08-12': 102.42,
+    '1987-08-25': 336.77,
+    '1987-10-19': 224.84,
+    '2000-03-24': 1527.46,
+    '2002-10-09': 776.76,
+    '2007-10-09': 1565.15,
+    '2009-03-09': 676.53,
+    '2020-03-23': 2237.40,
+    '2024-02-09': 5026.61,
+    '2026-12-31': 7600.00
+}
+
+# Master Truth Table (1929-2026) - MASTER_HISTORY (for backward compatibility)
+MASTER_HISTORY = {
+    '^DJI': DOW_JONES_TABLE,
+    '^GSPC': SP500_TABLE
+}
+
+# Black Monday 1987-10-19 event
+BLACK_MONDAY_DROPS = {
+    '^DJI': 0.226,  # 22.6% drop
+    '^GSPC': 0.204  # 20.4% drop
+}
+
+def lerp(start: float, end: float, t: float) -> float:
+    """Linear interpolation between start and end values"""
+    return start + (end - start) * t
+
+def sinusoidal_ease(start: float, end: float, t: float) -> float:
+    """Sinusoidal easing for smoother transitions (rounds out tops and bottoms)"""
+    # Ease-in-out using sine function
+    eased_t = -(math.cos(math.pi * t) - 1) / 2
+    return start + (end - start) * eased_t
 
 
 def generate_sample_data():
@@ -77,8 +167,6 @@ def generate_sample_data():
                 # Use fallback price for Jan 1, 1928
                 if date_str == '1928-01-01':
                     price = FALLBACK_PRICES_1928[ticker]
-                    # Apply inflation multiplier
-                    price = price * INFLATION_MULTIPLIER
                     prices[date_str] = round(price, 2)
                 elif current_date.weekday() < 5:
                     # Skip weekends for stocks
@@ -94,8 +182,7 @@ def generate_sample_data():
                         change = (hash(date_str) % 100 - 45) / 1000
                     
                     price = price * (1 + change)
-                    # Apply inflation multiplier to all prices
-                    price = price * INFLATION_MULTIPLIER
+                    # Ensure price doesn't go negative
                     if price < 0.01:
                         price = 0.01
                     prices[date_str] = round(price, 2)
@@ -117,25 +204,86 @@ class DataEngine:
     def __init__(self):
         self.stock_data: Dict[str, Dict[str, float]] = {}
         self.ipo_dates: Dict[str, str] = {}
-        self._load_or_fetch_data()
+        self.sorted_price_dates: Dict[str, list] = {}
+        
+        if PRACTICE_MODE:
+            self._load_practice_data()
+        else:
+            self._load_or_fetch_data()
+        self._index_price_dates()
+    
+    def _load_practice_data(self):
+        """Load practice mode data"""
+        print("Loading practice mode data...")
+        self.stock_data = PRACTICE_DATA['prices']
+        self.ipo_dates = PRACTICE_DATA['ipo_dates']
+        print(f"Loaded practice data for {len(self.stock_data)} ticker(s)")
     
     def _load_or_fetch_data(self):
-        """Load cached data or fetch from yfinance"""
+        """Load cached data or generate from Monthly Historical Truth Table"""
+        # Force delete stock_data_cache.json for this refactor
         if os.path.exists(CACHE_FILE):
-            print("Loading cached stock data...")
-            self._load_cache()
-            return
-        
-        print("Attempting to fetch stock data from yfinance...")
+            print("Force deleting stock_data_cache.json for v4.8 refactor...")
+            os.remove(CACHE_FILE)
+
+        # Version-based cache invalidation
+        CACHE_VERSION_FILE = 'cache_version.txt'
+        APP_VERSION = '4.1'  # Hard-coded to avoid circular import
+
+        current_version = APP_VERSION
+        cached_version = None
+
+        if os.path.exists(CACHE_VERSION_FILE):
+            with open(CACHE_VERSION_FILE, 'r') as f:
+                cached_version = f.read().strip()
+
+        # Clear cache if version mismatch
+        if cached_version != current_version:
+            print(f"Cache version mismatch (cached: {cached_version}, current: {current_version}), clearing cache...")
+            if os.path.exists(CACHE_FILE):
+                os.remove(CACHE_FILE)
+            with open(CACHE_VERSION_FILE, 'w') as f:
+                f.write(current_version)
+
+        print("Loading stock data from Monthly Historical Truth Table...")
         self._fetch_all_data()
-        
+
         # If no data was fetched, generate sample data
         if not self.stock_data:
-            print("yfinance unavailable, generating sample data...")
+            print("Generating sample data...")
             self._generate_sample_data()
-        
+
         self._save_cache()
-    
+
+    def reload_data(self):
+        """Reload historical or practice data when mode changes."""
+        from practice_mode import PRACTICE_MODE as practice_flag
+        global TICKERS, COMPANY_NAMES, IPO_DATES
+
+        if practice_flag:
+            TICKERS = PRACTICE_DATA['tickers']
+            COMPANY_NAMES = PRACTICE_DATA['company_names']
+            IPO_DATES = PRACTICE_DATA['ipo_dates']
+            self._load_practice_data()
+        else:
+            TICKERS = ['^DJI', '^GSPC']
+            COMPANY_NAMES = {
+                '^DJI': 'Dow Jones Industrial Average',
+                '^GSPC': 'S&P 500'
+            }
+            IPO_DATES = {
+                '^DJI': '1900-01-01',
+                '^GSPC': '1957-03-01'
+            }
+            self._load_or_fetch_data()
+        self._index_price_dates()
+
+    def _index_price_dates(self):
+        self.sorted_price_dates = {
+            ticker: sorted(prices.keys())
+            for ticker, prices in self.stock_data.items()
+        }
+
     def _load_cache(self):
         """Load data from cache file"""
         try:
@@ -163,67 +311,37 @@ class DataEngine:
             print(f"Error saving cache: {e}")
     
     def _fetch_all_data(self):
-        """Fetch historical data for all tickers"""
+        """Fetch historical data for all tickers using Historical Truth Table"""
         for ticker in TICKERS:
             self._fetch_ticker_data(ticker)
-            time.sleep(0.5)
-    
+
     def _fetch_ticker_data(self, ticker: str):
-        """Fetch historical data for a single ticker"""
+        """Fetch historical data for a single ticker using MASTER_HISTORY"""
         try:
-            print(f"Fetching {ticker}...")
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period="max")
-            
-            if hist.empty:
-                hist = stock.history(start="1920-01-01", end="2024-12-31")
-            
-            if hist.empty:
-                print(f"  No data available for {ticker}")
+            print(f"Loading MASTER_HISTORY for {ticker}...")
+
+            # For DJI, use MASTER_HISTORY directly - save to stock_data to stop initialization loop
+            if ticker == '^DJI':
+                benchmarks = MASTER_HISTORY.get('^DJI', {})
+                print(f"  Loaded {len(benchmarks)} historical benchmarks for DJI")
+                self.ipo_dates[ticker] = IPO_DATES.get(ticker, '1928-01-01')
+                # Save to stock_data to stop initialization loop
+                self.stock_data[ticker] = benchmarks
+                self._initialized = True
                 return
-            
-            prices = {}
-            for date, row in hist.iterrows():
-                if pd.notna(row['Close']):
-                    date_str = date.strftime('%Y-%m-%d')
-                    
-                    # Use fallback price for Jan 1, 1928 (historical reference)
-                    if date_str == '1928-01-01' and ticker in FALLBACK_PRICES_1928:
-                        # $200 * 18 = $3,600 for Dow Jones
-                        price = FALLBACK_PRICES_1928[ticker]
-                    else:
-                        # Apply inflation multiplier to convert to 2026 dollars
-                        price = float(row['Close']) * INFLATION_MULTIPLIER
-                    
-                    prices[date_str] = round(price, 2)
-            
-            if prices:
-                self.stock_data[ticker] = prices
-                
-                # Fill in missing dates between 1928 and fetched data range
-                # (must be done BEFORE adding 1928-01-01 fallback)
-                self._fill_missing_dates(ticker, prices)
-                
-                # Add fallback price for 1928-01-01 if not in fetched data
-                if '1928-01-01' not in prices and ticker in FALLBACK_PRICES_1928:
-                    # Apply inflation multiplier: $200 * 18 = $3,600
-                    prices['1928-01-01'] = FALLBACK_PRICES_1928[ticker] * INFLATION_MULTIPLIER
-                    self.stock_data[ticker] = prices
-                
-                # Use historical IPO dates, not the fetched data range
-                self.ipo_dates[ticker] = IPO_DATES.get(ticker, min(prices.keys()))
-                print(f"  {ticker}: {len(prices)} days, IPO: {self.ipo_dates[ticker]}")
-                
+
+            # For other tickers, use sample data
+            print(f"  Using sample data for {ticker}")
+            sample = generate_sample_data()
+            if ticker in sample:
+                self.stock_data[ticker] = sample[ticker]['prices']
+                self.ipo_dates[ticker] = sample[ticker]['ipo_date']
+                print(f"  {ticker}: {len(sample[ticker]['prices'])} days, IPO: {sample[ticker]['ipo_date']}")
+                self._initialized = True
+                return
+
         except Exception as e:
-            print(f"  Error fetching {ticker}: {e}")
-    
-    def _generate_sample_data(self):
-        """Generate sample data when yfinance fails"""
-        sample = generate_sample_data()
-        
-        for ticker, data in sample.items():
-            self.stock_data[ticker] = data['prices']
-            self.ipo_dates[ticker] = data['ipo_date']
+            print(f"  Error generating data for {ticker}: {e}")
     
     def _fill_missing_dates(self, ticker: str, prices: Dict[str, float]):
         """Fill in missing dates between 1928 and fetched data range with sample data"""
@@ -238,7 +356,7 @@ class DataEngine:
         # Only fill if we have a gap between 1928 and the fetched data
         if first_date > '1928-01-01' and ticker in FALLBACK_PRICES_1928:
             # Start from the fallback price
-            current_price = FALLBACK_PRICES_1928[ticker] * INFLATION_MULTIPLIER
+            current_price = FALLBACK_PRICES_1928[ticker]
             
             # Calculate target price (first fetched price)
             target_price = prices[first_date]
@@ -281,21 +399,106 @@ class DataEngine:
             self.stock_data[ticker] = prices
     
     def get_price(self, ticker: str, date: str) -> Optional[float]:
-        # S&P 500 (^GSPC) not available before 1957-03-01
-        if ticker == '^GSPC' and date < '1957-03-01':
+        try:
+            # Use MASTER_HISTORY for both DJI and GSPC - all dates
+            if ticker in MASTER_HISTORY:
+                benchmarks = MASTER_HISTORY.get(ticker, {})
+                sorted_benchmarks = sorted(benchmarks.items(), key=lambda x: x[0])
+
+                # Find the two closest benchmarks for interpolation
+                prev_date = None
+                prev_value = None
+                next_date = None
+                next_value = None
+
+                for benchmark_date, benchmark_value in sorted_benchmarks:
+                    if date <= benchmark_date:
+                        next_date = benchmark_date
+                        next_value = benchmark_value
+                        break
+                    prev_date = benchmark_date
+                    prev_value = benchmark_value
+
+                # Apply Linear Interpolation between benchmarks
+                if prev_date and next_date:
+                    prev_dt = datetime.strptime(prev_date, '%Y-%m-%d')
+                    next_dt = datetime.strptime(next_date, '%Y-%m-%d')
+                    current_dt = datetime.strptime(date, '%Y-%m-%d')
+                    total_days = (next_dt - prev_dt).days
+                    elapsed_days = (current_dt - prev_dt).days
+                    t = elapsed_days / total_days if total_days > 0 else 0
+
+                    # Use Linear Interpolation
+                    base_price = lerp(prev_value, next_value, t)
+
+                    # Early game smoothness: first 12 months reduce variability by 50%
+                    # High variability after first year: random.uniform(-0.02, 0.02)
+                    start_date = self.ipo_dates.get(ticker, '1928-01-01')
+                    game_start = datetime.strptime(start_date, '%Y-%m-%d')
+                    current_date_obj = datetime.strptime(date, '%Y-%m-%d')
+                    days_elapsed = (current_date_obj - game_start).days
+
+                    if days_elapsed <= 365:  # First 12 months
+                        # Reduce variability by 50% for smoothness
+                        jittered_price = base_price * (1 + random.uniform(-0.014, 0.014))
+                    else:
+                        # High variability after first year
+                        jittered_price = base_price * (1 + random.uniform(-0.028, 0.028))
+
+                    return round(max(jittered_price, 0.01), 2)
+                elif prev_date:
+                    # After last benchmark, use last value with cumulative random walk
+                    start_date = self.ipo_dates.get(ticker, '1928-01-01')
+                    game_start = datetime.strptime(start_date, '%Y-%m-%d')
+                    current_date_obj = datetime.strptime(date, '%Y-%m-%d')
+                    days_elapsed = (current_date_obj - game_start).days
+
+                    if days_elapsed <= 365:  # First 12 months
+                        jittered_price = prev_value * (1 + random.uniform(-0.014, 0.014))
+                    else:
+                        jittered_price = prev_value * (1 + random.uniform(-0.028, 0.028))
+                    return round(max(jittered_price, 0.01), 2)
+                elif next_date:
+                    # Before first benchmark, use first value with cumulative random walk
+                    start_date = self.ipo_dates.get(ticker, '1928-01-01')
+                    game_start = datetime.strptime(start_date, '%Y-%m-%d')
+                    current_date_obj = datetime.strptime(date, '%Y-%m-%d')
+                    days_elapsed = (current_date_obj - game_start).days
+
+                    if days_elapsed <= 365:  # First 12 months
+                        jittered_price = next_value * (1 + random.uniform(-0.014, 0.014))
+                    else:
+                        jittered_price = next_value * (1 + random.uniform(-0.028, 0.028))
+                    return round(max(jittered_price, 0.01), 2)
+                else:
+                    # No benchmarks, use fallback
+                    return FALLBACK_PRICES_1928.get(ticker, 150.00)
+
+            # Get base price from stock data for dates >= 1950
+            if ticker not in self.stock_data:
+                return None
+
+            ipo_date = self.ipo_dates.get(ticker)
+            if ipo_date and date < ipo_date:
+                return None
+
+            if date in self.stock_data[ticker]:
+                base_price = self.stock_data[ticker][date]
+            else:
+                base_price = self._find_closest_price(ticker, date)
+
+            if base_price is None:
+                return None
+
+            # Apply Black Monday 1987-10-19 drop
+            if date == '1987-10-19' and ticker in BLACK_MONDAY_DROPS:
+                drop_percentage = BLACK_MONDAY_DROPS[ticker]
+                return round(base_price * (1 - drop_percentage), 2)
+
+            return base_price
+        except Exception as e:
+            print(f"ERROR in get_price for {ticker} on {date}: {e}")
             return None
-
-        if ticker not in self.stock_data:
-            return None
-
-        ipo_date = self.ipo_dates.get(ticker)
-        if ipo_date and date < ipo_date:
-            return None
-
-        if date in self.stock_data[ticker]:
-            return self.stock_data[ticker][date]
-
-        return self._find_closest_price(ticker, date)
     
     def _find_closest_price(self, ticker: str, target_date: str) -> Optional[float]:
         """Find the closest trading day price before or on the target date"""
@@ -303,19 +506,15 @@ class DataEngine:
         if not prices:
             return None
         
-        target = datetime.strptime(target_date, '%Y-%m-%d')
-        
-        valid_dates = []
-        for date_str in prices.keys():
-            date = datetime.strptime(date_str, '%Y-%m-%d')
-            if date <= target:
-                valid_dates.append(date)
-        
-        if not valid_dates:
+        sorted_dates = self.sorted_price_dates.get(ticker)
+        if not sorted_dates:
             return None
-        
-        closest = max(valid_dates)
-        return prices[closest.strftime('%Y-%m-%d')]
+
+        index = bisect_right(sorted_dates, target_date) - 1
+        if index < 0:
+            return None
+
+        return prices[sorted_dates[index]]
     
     def is_available(self, ticker: str, date: str) -> bool:
         """Check if a stock is available for trading on a given date"""
@@ -359,11 +558,42 @@ class DataEngine:
         all_dates = set()
         for prices in self.stock_data.values():
             all_dates.update(prices.keys())
-        
+
         if not all_dates:
             return (baseline_start, '2024-12-31')
-        
+
         return (baseline_start, max(all_dates))
+
+    def get_historical_prices(self, ticker: str, start_date: str, end_date: str, num_points: int = 100) -> Dict[str, float]:
+        """Get historical prices for a ticker between start_date and end_date"""
+        if ticker not in self.stock_data:
+            return {}
+
+        prices = {}
+        start = datetime.strptime(start_date, '%Y-%m-%d')
+        end = datetime.strptime(end_date, '%Y-%m-%d')
+
+        # Calculate the step size to get num_points
+        total_days = (end - start).days
+        if total_days <= 0:
+            return {}
+        step_size = max(1, total_days // num_points)
+
+        current = start
+        count = 0
+        while current <= end and count < num_points:
+            date_str = current.strftime('%Y-%m-%d')
+            price = self.get_price(ticker, date_str)
+            if price is not None:
+                prices[date_str] = price
+                count += 1
+            current += timedelta(days=step_size)
+
+        return prices
+
+
+# Global data engine instance
+data_engine = DataEngine()
 
 
 # Global data engine instance

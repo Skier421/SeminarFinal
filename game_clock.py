@@ -14,10 +14,11 @@ from data_engine import data_engine
 class GameClock:
     """Manages the game clock and time progression"""
     
-    # Presentation speed: every second advances about 3 months.
+    # Dynamic Time Dilation
+    BASE_SPEED = 1.0  # Normal mode interval
     MONTHS_PER_TICK = 3
-    NORMAL_SECONDS_PER_TICK = 1.0
-    PANIC_SECONDS_PER_TICK = 3.0
+    NORMAL_SECONDS_PER_TICK = BASE_SPEED  # 1.0 seconds in normal mode
+    DOWN_MARKET_SECONDS_PER_TICK = 1.35
     
     def __init__(self, room_code: str):
         self.room_code = room_code
@@ -53,8 +54,10 @@ class GameClock:
     def _run_clock(self):
         """Main clock loop - runs in separate thread"""
         while self._running:
+            tick_started_at = time.monotonic()
             try:
                 if self.game_state == 'playing':
+                    previous_date = self.current_date
                     previous_price = data_engine.get_price('^DJI', self.current_date)
                     self._advance_time()
                     current_price = data_engine.get_price('^DJI', self.current_date)
@@ -74,11 +77,15 @@ class GameClock:
                     # Broadcast game state updates for the room
                     if self._broadcast_callback:
                         self._broadcast_callback(self.room_code)
+                        # Throttle emissions to reduce stutter
+                        from app import socketio
+                        socketio.sleep(0.5)
             except Exception as e:
                 # Keep clock thread alive if a broadcast or emit fails transiently.
                 print(f"Clock loop error in room {self.room_code}: {e}")
 
-            time.sleep(self._current_tick_interval)
+            elapsed = time.monotonic() - tick_started_at
+            time.sleep(max(0, self._current_tick_interval - elapsed))
     
     def _advance_time(self):
         """Advance time by approximately three calendar months."""
@@ -98,12 +105,8 @@ class GameClock:
         # Check if we have data for this date
         max_date = data_engine.get_date_range()[1]
         next_date_str = next_day.strftime('%Y-%m-%d')
-        
-        if next_date_str > max_date:
-            # Reached end of available data, pause
-            self.game_state = 'paused'
-            return
-        
+
+        # Allow game to continue indefinitely - remove hard end date check
         self.current_date = next_date_str
 
     def _update_panic_mode(self, previous_price: Optional[float], current_price: Optional[float]):
@@ -111,26 +114,8 @@ class GameClock:
             return
 
         change = (current_price - previous_price) / previous_price
-        from app import socketio
-
-        if not self.panic_mode and change <= -0.02:
-            self.panic_mode = True
-            self._current_tick_interval = self.PANIC_SECONDS_PER_TICK
-            socketio.emit('market_panic', {
-                'message': 'Market Panic: Dow dropped sharply. Time dilation engaged.',
-                'drop_percent': round(change * 100, 2),
-                'date': self.current_date
-            }, room=self.room_code)
-            return
-
-        if self.panic_mode and change >= -0.005:
-            self.panic_mode = False
-            self._current_tick_interval = self.NORMAL_SECONDS_PER_TICK
-            socketio.emit('market_event', {
-                'type': 'panic_recovery',
-                'message': 'Market is stabilizing. Time dilation released.',
-                'date': self.current_date
-            }, room=self.room_code)
+        self.panic_mode = change < 0
+        self._current_tick_interval = self.DOWN_MARKET_SECONDS_PER_TICK if change < 0 else self.NORMAL_SECONDS_PER_TICK
 
 
     def set_date(self, date: str):
@@ -171,6 +156,7 @@ class GameClock:
         self.current_date = start_date
         self.game_state = 'paused'
         self._running = False
+        self._sp500_notified = False
 
 
 # Global clock manager
